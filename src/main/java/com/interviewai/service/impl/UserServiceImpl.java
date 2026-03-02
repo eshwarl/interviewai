@@ -1,7 +1,7 @@
 package com.interviewai.service.impl;
 
-import com.interviewai.exception.InvalidCredentialsException;
-import com.interviewai.exception.UserAlreadyExistsException;
+import com.interviewai.exception.auth.InvalidCredentialsException;
+import com.interviewai.exception.auth.UserAlreadyExistsException;
 import com.interviewai.model.Role;
 import com.interviewai.model.User;
 import com.interviewai.repository.UserRepository;

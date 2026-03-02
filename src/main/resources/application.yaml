@@ -1,12 +1,13 @@
-
 spring:
   profiles:
-    active: dev
+    active: prod
   datasource:
     url: ${DB_URL}
     username: ${DB_USERNAME}
     password: ${DB_PASSWORD}
     driver-class-name: org.postgresql.Driver
+  jwt:
+    secret: ${JWT_SECRET}
 
   jpa:
     hibernate:
@@ -22,13 +23,17 @@ spring:
 
   ai:
     openai:
-      api-key: ${OPENAI_API_KEY}
+      api-key: ${GROQ_API_KEY}
+      base-url: https://api.groq.com/openai
       chat:
         options:
-          model: gpt-4o-mini
+          model: llama-3.3-70b-versatile
           temperature: 0.7
-
+          stream: true
+  servlet:
+    multipart:
+      enabled: true
+      max-file-size: 5MB
+      max-request-size: 5MB
 server:
   port: 8082
-
-

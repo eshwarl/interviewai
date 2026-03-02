@@ -1,30 +1,37 @@
 package com.interviewai.service.impl;
 
+import com.interviewai.exception.interview.InterviewNotFoundException;
+import com.interviewai.exception.interview.InvalidInterviewStateException;
+import com.interviewai.exception.interview.UnauthorizedInterviewAccessException;
+import com.interviewai.exception.user.UserNotFoundException;
 import com.interviewai.model.*;
 import com.interviewai.repository.InterviewRepository;
 import com.interviewai.repository.UserRepository;
 import com.interviewai.service.AiEvaluationService;
 import com.interviewai.service.InterviewService;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
 
-
-
+@Slf4j
 @Service
+@Transactional
 public class InterviewServiceImpl implements InterviewService {
 
     private final InterviewRepository interviewRepository;
     private final UserRepository userRepository;
-    private AiEvaluationService aiEvaluationService;
+    private final AiEvaluationService aiEvaluationService;
 
     public InterviewServiceImpl(InterviewRepository interviewRepository,
-                                UserRepository userRepository,AiEvaluationService aiEvaluationService) {
-         this.aiEvaluationService = aiEvaluationService;
+                                UserRepository userRepository,
+                                AiEvaluationService aiEvaluationService) {
         this.interviewRepository = interviewRepository;
         this.userRepository = userRepository;
+        this.aiEvaluationService = aiEvaluationService;
     }
 
     // ==============================
@@ -38,17 +45,17 @@ public class InterviewServiceImpl implements InterviewService {
                                        String adminEmail) {
 
         User admin = userRepository.findByEmail(adminEmail)
-                .orElseThrow(() -> new RuntimeException("Admin not found"));
+                .orElseThrow(() -> new UserNotFoundException(adminEmail));
 
         if (admin.getRole() != Role.ADMIN) {
-            throw new RuntimeException("Only admin can schedule interviews");
+            throw new UnauthorizedInterviewAccessException();
         }
 
         User candidate = userRepository.findByEmail(candidateEmail)
-                .orElseThrow(() -> new RuntimeException("Candidate not registered"));
+                .orElseThrow(() -> new UserNotFoundException(candidateEmail));
 
         if (candidate.getRole() != Role.USER) {
-            throw new RuntimeException("Selected user is not a candidate");
+            throw new InvalidInterviewStateException("Selected user is not a candidate");
         }
 
         String passkey = generatePasskey();
@@ -64,6 +71,7 @@ public class InterviewServiceImpl implements InterviewService {
                 .createdAt(LocalDateTime.now())
                 .build();
 
+        log.info("Interview scheduled: {} for candidate: {}", title, candidateEmail);
         return interviewRepository.save(interview);
     }
 
@@ -74,18 +82,21 @@ public class InterviewServiceImpl implements InterviewService {
     public Interview joinLobby(String passkey, String userEmail) {
 
         Interview interview = interviewRepository.findByPasskey(passkey)
-                .orElseThrow(() -> new RuntimeException("Invalid passkey"));
+                .orElseThrow(() -> new InvalidInterviewStateException("Invalid passkey"));
 
         if (!interview.getCandidate().getEmail().equals(userEmail)) {
-            throw new RuntimeException("You are not authorized for this interview");
+            throw new UnauthorizedInterviewAccessException();
         }
 
         if (interview.getStatus() != InterviewStatus.SCHEDULED) {
-            throw new RuntimeException("Interview is not in scheduled state");
+            throw new InvalidInterviewStateException(
+                    "Interview is not in SCHEDULED state. Current state: " + interview.getStatus()
+            );
         }
 
         interview.setStatus(InterviewStatus.LOBBY);
 
+        log.info("Candidate {} joined lobby for interview {}", userEmail, interview.getId());
         return interviewRepository.save(interview);
     }
 
@@ -96,70 +107,61 @@ public class InterviewServiceImpl implements InterviewService {
     public Interview startInterview(Long interviewId, String userEmail) {
 
         Interview interview = interviewRepository.findById(interviewId)
-                .orElseThrow(() -> new RuntimeException("Interview not found"));
+                .orElseThrow(() -> new InterviewNotFoundException(interviewId));
 
         if (!interview.getCandidate().getEmail().equals(userEmail)) {
-            throw new RuntimeException("You are not authorized");
+            throw new UnauthorizedInterviewAccessException();
         }
 
         if (interview.getStatus() != InterviewStatus.LOBBY) {
-            throw new RuntimeException("Interview must be in lobby state");
+            throw new InvalidInterviewStateException(
+                    "Interview must be in LOBBY state to start. Current state: " + interview.getStatus()
+            );
         }
 
         interview.setStatus(InterviewStatus.IN_PROGRESS);
 
+        log.info("Interview {} started by {}", interviewId, userEmail);
         return interviewRepository.save(interview);
     }
-    //end interview code here
-//    @Override
-//    public Interview endInterview(Long interviewId, String userEmail) {
-//
-//        Interview interview = interviewRepository.findById(interviewId)
-//                .orElseThrow(() -> new RuntimeException("Interview not found"));
-//
-//        if (!interview.getCandidate().getEmail().equals(userEmail)) {
-//            throw new RuntimeException("You are not authorized");
-//        }
-//
-//        if (interview.getStatus() != InterviewStatus.IN_PROGRESS) {
-//            throw new RuntimeException("Interview is not in progress");
-//        }
-//
-//        interview.setStatus(InterviewStatus.COMPLETED);
-//
-//        return interviewRepository.save(interview);
-//    }
+
+    // ==============================
+    // 4️⃣ CANDIDATE – End Interview
+    // ==============================
     @Override
     public InterviewResult endInterview(Long interviewId, String userEmail) {
 
         Interview interview = interviewRepository.findById(interviewId)
-                .orElseThrow(() -> new RuntimeException("Interview not found"));
+                .orElseThrow(() -> new InterviewNotFoundException(interviewId));
 
         if (!interview.getCandidate().getEmail().equals(userEmail)) {
-            throw new RuntimeException("Unauthorized");
+            throw new UnauthorizedInterviewAccessException();
         }
 
         if (interview.getStatus() != InterviewStatus.IN_PROGRESS) {
-            throw new RuntimeException("Interview not in progress");
+            throw new InvalidInterviewStateException(
+                    "Interview must be IN_PROGRESS to end. Current state: " + interview.getStatus()
+            );
         }
 
-        // ✅ Set status completed
         interview.setStatus(InterviewStatus.COMPLETED);
         interviewRepository.save(interview);
 
-        // ✅ Call AI evaluation service
+        log.info("Interview {} completed by {}", interviewId, userEmail);
+
+        // ✅ Trigger AI evaluation
         return aiEvaluationService.evaluateInterview(interviewId);
     }
 
-
     // ==============================
-    // 4️⃣ CANDIDATE – View My Interviews
+    // 5️⃣ CANDIDATE – View My Interviews
     // ==============================
     @Override
+    @Transactional(readOnly = true)
     public List<Interview> getCandidateInterviews(String userEmail) {
 
         User user = userRepository.findByEmail(userEmail)
-                .orElseThrow(() -> new RuntimeException("User not found"));
+                .orElseThrow(() -> new UserNotFoundException(userEmail));
 
         return interviewRepository.findByCandidate(user);
     }

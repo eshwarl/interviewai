@@ -1,4 +1,4 @@
-package com.interviewai.exception;
+package com.interviewai.exception.auth;
 
 public class InvalidCredentialsException extends RuntimeException {
 

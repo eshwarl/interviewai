@@ -1,0 +1,1765 @@
+﻿package com.interviewai;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class InterviewAiApplication {
+
+	public static void main(String[] args) {
+		SpringApplication.run(InterviewAiApplication.class, args);
+	}
+
+}
+package com.interviewai.config;
+
+import com.interviewai.security.JwtAuthenticationFilter;
+import lombok.RequiredArgsConstructor;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.CorsConfigurationSource;
+import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+
+import java.util.List;
+
+@Configuration
+@RequiredArgsConstructor
+public class SecurityConfig {
+
+    private final JwtAuthenticationFilter jwtFilter;
+
+    @Bean
+    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+
+        http
+                // ðŸ”¥ Enable CORS properly
+                .cors(cors -> cors.configurationSource(corsConfigurationSource()))
+
+                .csrf(csrf -> csrf.disable())
+
+                .sessionManagement(session ->
+                        session.sessionCreationPolicy(SessionCreationPolicy.STATELESS)
+                )
+
+                .authorizeHttpRequests(auth -> auth
+
+                        // ðŸ”¥ Important: allow preflight
+                        .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
+
+                        .requestMatchers("/api/auth/**").permitAll()
+                        .requestMatchers("/api/admin/**").hasRole("ADMIN")
+                        .requestMatchers("/api/user/**").hasRole("USER")
+
+                        // ðŸ”¥ Allow WebSocket handshake
+                        .requestMatchers("/ws-interview/**").permitAll()
+
+                        .anyRequest().authenticated()
+                )
+
+                .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class);
+
+        return http.build();
+    }
+
+    // ðŸ”¥ Proper CORS config for WebSocket + REST
+    @Bean
+    public CorsConfigurationSource corsConfigurationSource() {
+
+        CorsConfiguration configuration = new CorsConfiguration();
+
+        configuration.setAllowCredentials(true);
+
+        // IMPORTANT: Must match frontend origin exactly
+        configuration.setAllowedOrigins(List.of("http://localhost:5173"));
+
+        configuration.setAllowedHeaders(List.of("*"));
+        configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
+
+        UrlBasedCorsConfigurationSource source =
+                new UrlBasedCorsConfigurationSource();
+
+        source.registerCorsConfiguration("/**", configuration);
+
+        return source;
+    }
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+}
+package com.interviewai.config;
+
+import com.interviewai.security.JwtUtil;
+import lombok.RequiredArgsConstructor;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.MessageChannel;
+import org.springframework.messaging.simp.stomp.StompCommand;
+import org.springframework.messaging.simp.stomp.StompHeaderAccessor;
+import org.springframework.messaging.support.ChannelInterceptor;
+import org.springframework.messaging.support.MessageHeaderAccessor;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.stereotype.Component;
+
+import java.util.ArrayList;
+
+@Component
+@RequiredArgsConstructor
+public class WebSocketAuthInterceptor implements ChannelInterceptor {
+
+    private final JwtUtil jwtUtil;
+
+    @Override
+    public Message<?> preSend(Message<?> message, MessageChannel channel) {
+
+        StompHeaderAccessor accessor =
+                MessageHeaderAccessor.getAccessor(message, StompHeaderAccessor.class);
+
+        if (accessor != null && StompCommand.CONNECT.equals(accessor.getCommand())) {
+
+            String authHeader = accessor.getFirstNativeHeader("Authorization");
+
+            if (authHeader != null && authHeader.startsWith("Bearer ")) {
+
+                String token = authHeader.substring(7);
+
+                // âœ… Validate token first
+                if (jwtUtil.validateToken(token)) {
+
+                    // âœ… Extract email (your subject)
+                    String email = jwtUtil.extractEmail(token);
+
+                    UsernamePasswordAuthenticationToken authentication =
+                            new UsernamePasswordAuthenticationToken(
+                                    email,
+                                    null,
+                                    new ArrayList<>()
+                            );
+
+                    accessor.setUser(authentication);
+                    accessor.setLeaveMutable(true);
+                } else {
+                    throw new RuntimeException("Invalid JWT token");
+                }
+            }
+        }
+
+        return message;
+    }
+}
+package com.interviewai.config;
+
+import lombok.RequiredArgsConstructor;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.messaging.simp.config.MessageBrokerRegistry;
+import org.springframework.messaging.simp.config.ChannelRegistration;
+import org.springframework.web.socket.config.annotation.*;
+
+@Configuration
+@EnableWebSocketMessageBroker
+@RequiredArgsConstructor
+public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
+
+    private final WebSocketAuthInterceptor webSocketAuthInterceptor;
+
+    @Override
+    public void configureMessageBroker(MessageBrokerRegistry registry) {
+        registry.enableSimpleBroker("/topic");
+        registry.setApplicationDestinationPrefixes("/app");
+    }
+
+    @Override
+    public void registerStompEndpoints(StompEndpointRegistry registry) {
+        registry.addEndpoint("/ws-interview")
+                .setAllowedOrigins("http://localhost:5173")
+                .withSockJS();
+//        registry.addEndpoint("/ws-interview")
+//                .setAllowedOriginPatterns("*");
+    }
+
+    @Override
+    public void configureClientInboundChannel(ChannelRegistration registration) {
+        registration.interceptors(webSocketAuthInterceptor);
+    }
+}
+package com.interviewai.controller;
+
+import com.interviewai.model.Interview;
+import com.interviewai.service.InterviewService;
+import org.springframework.security.core.Authentication;
+import org.springframework.web.bind.annotation.*;
+
+import java.time.LocalDateTime;
+
+@RestController
+@RequestMapping("/api/admin")
+public class AdminController {
+
+    private final InterviewService interviewService;
+
+    public AdminController(InterviewService interviewService) {
+        this.interviewService = interviewService;
+    }
+
+    @PostMapping("/schedule")
+    public Interview scheduleInterview(
+            @RequestParam String title,
+            @RequestParam String candidateEmail,
+            @RequestParam String scheduledTime,
+            @RequestParam Integer durationMinutes,
+            Authentication authentication
+    ) {
+
+        String adminEmail = authentication.getName();
+
+        return interviewService.scheduleInterview(
+                title,
+                candidateEmail,
+                LocalDateTime.parse(scheduledTime),
+                durationMinutes,
+                adminEmail
+        );
+    }
+}
+package com.interviewai.controller;
+
+import com.interviewai.service.AiInterviewService;
+import org.springframework.security.core.Authentication;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/api/user/interview")
+public class AiInterviewController {
+
+    private final AiInterviewService aiInterviewService;
+
+    public AiInterviewController(AiInterviewService aiInterviewService) {
+        this.aiInterviewService = aiInterviewService;
+    }
+
+    @PostMapping("/{interviewId}/chat")
+    public String chatWithAi(@PathVariable Long interviewId,
+                             @RequestBody String message,
+                             Authentication authentication) {
+
+        String email = authentication.getName();
+
+        return aiInterviewService.generateAiReply(interviewId, message, email);
+    }
+    @PostMapping("/{interviewId}/start")
+    public String startInterview(@PathVariable Long interviewId,
+                                 Authentication authentication) {
+
+        String email = authentication.getName();
+
+        return aiInterviewService.startInterviewSession(interviewId, email);
+    }
+
+}
+package com.interviewai.controller;
+
+import com.interviewai.dto.AuthResponse;
+import com.interviewai.model.User;
+import com.interviewai.security.JwtUtil;
+import com.interviewai.service.UserService;
+import org.springframework.web.bind.annotation.*;
+
+
+
+@RestController
+@RequestMapping("/api/auth")
+public class AuthController {
+
+    private final UserService userService;
+    private final JwtUtil jwtUtil;
+
+    public AuthController(UserService userService, JwtUtil jwtUtil) {
+        this.userService = userService;
+        this.jwtUtil = jwtUtil;
+    }
+
+
+    @PostMapping("/register")
+    public User register(
+            @RequestParam String name,
+            @RequestParam String email,
+            @RequestParam String password,
+            @RequestParam String role
+    ) {
+        return userService.registerUser(name, email, password, role);
+    }
+    @PostMapping("/login")
+    public String login(
+            @RequestParam String email,
+            @RequestParam String password
+    ) {
+        User user = userService.loginUser(email, password);
+
+        return jwtUtil.generateToken(
+                user.getEmail(),
+                user.getRole().name()
+        );
+    }
+
+
+}
+package com.interviewai.controller;
+
+import com.interviewai.model.Interview;
+import com.interviewai.model.InterviewResult;
+import com.interviewai.service.AiEvaluationService;
+import com.interviewai.service.InterviewService;
+import org.springframework.security.core.Authentication;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+
+@RestController
+@RequestMapping("/api/user")
+public class CandidateController {
+
+    private final InterviewService interviewService;
+    private final AiEvaluationService aiEvaluationService;
+
+    public CandidateController(InterviewService interviewService, AiEvaluationService aiEvaluationService) {
+        this.interviewService = interviewService;
+        this.aiEvaluationService = aiEvaluationService;
+    }
+
+    // 1ï¸âƒ£ Join Lobby using Passkey
+    @PostMapping("/join")
+    public Interview joinLobby(@RequestParam String passkey,
+                               Authentication authentication) {
+
+        String userEmail = authentication.getName();
+
+        return interviewService.joinLobby(passkey, userEmail);
+    }
+
+    // 2ï¸âƒ£ Start Interview
+    @PostMapping("/start/{id}")
+    public Interview startInterview(@PathVariable Long id,
+                                    Authentication authentication) {
+
+        String userEmail = authentication.getName();
+
+        return interviewService.startInterview(id, userEmail);
+    }
+
+    // 3ï¸âƒ£ End Interview
+//    @PostMapping("/end/{id}")
+//    public Interview endInterview(@PathVariable Long id,
+//                                  Authentication authentication) {
+//
+//        String userEmail = authentication.getName();
+//
+//        return interviewService.endInterview(id, userEmail);
+//
+//
+//    }
+    @PostMapping("/{interviewId}/end")
+    public InterviewResult endInterview(@PathVariable Long interviewId,
+                                        Authentication authentication) {
+
+        String email = authentication.getName();
+
+        return interviewService.endInterview(interviewId, email);
+    }
+
+
+    // 4ï¸âƒ£ View My Interviews
+    @GetMapping("/my-interviews")
+    public List<Interview> getMyInterviews(Authentication authentication) {
+
+        String userEmail = authentication.getName();
+
+        return interviewService.getCandidateInterviews(userEmail);
+    }
+}
+package com.interviewai.controller;
+
+import com.interviewai.service.AiInterviewService;
+import lombok.RequiredArgsConstructor;
+import org.springframework.messaging.handler.annotation.*;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
+import org.springframework.stereotype.Controller;
+
+import java.security.Principal;
+
+@Controller
+@RequiredArgsConstructor
+public class InterviewChatWebSocketController {
+
+    private final SimpMessagingTemplate messagingTemplate;
+    private final AiInterviewService aiInterviewService;
+
+    // ðŸ”¹ Candidate sends message
+    @MessageMapping("/interview/{interviewId}/message")
+    public void handleCandidateMessage(
+            @DestinationVariable Long interviewId,
+            @Payload String message,
+            Principal principal
+    ) {
+
+        String email = principal.getName();
+
+        String aiResponse = aiInterviewService.generateAiReply(
+                interviewId,
+                message,
+                email
+        );
+
+        messagingTemplate.convertAndSend(
+                "/topic/interview/" + interviewId,
+                aiResponse
+        );
+    }
+
+    // ðŸ”¹ Start interview session (AI greeting)
+    @MessageMapping("/interview/{interviewId}/start")
+    public void startInterview(
+            @DestinationVariable Long interviewId,
+            Principal principal
+    ) {
+
+        String email = principal.getName();
+
+        String greeting = aiInterviewService.startInterviewSession(
+                interviewId,
+                email
+        );
+
+        messagingTemplate.convertAndSend(
+                "/topic/interview/" + interviewId,
+                greeting
+        );
+    }
+}
+package com.interviewai.controller;
+
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class TestController {
+
+    @GetMapping("/api/test")
+    public String test() {
+        return "JWT is working!";
+    }
+}
+package com.interviewai.controller;
+
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/api/user")
+public class UserController {
+
+    @GetMapping("/dashboard")
+    public String userDashboard() {
+        return "User access granted";
+    }
+}
+package com.interviewai.controller;
+
+import com.interviewai.dto.CandidateProfileRequest;
+import com.interviewai.model.CandidateProfile;
+import com.interviewai.service.CandidateProfileService;
+import org.springframework.security.core.Authentication;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/api/user/profile")
+public class UserProfileController {
+
+    private final CandidateProfileService candidateProfileService;
+
+    public UserProfileController(CandidateProfileService candidateProfileService) {
+        this.candidateProfileService = candidateProfileService;
+    }
+
+    // ðŸ”¹ CREATE PROFILE
+    @PostMapping
+    public CandidateProfile createProfile(
+            @RequestBody CandidateProfileRequest request,
+            Authentication authentication) {
+
+        String userEmail = authentication.getName();
+        return candidateProfileService.createProfile(request, userEmail);
+    }
+
+    // ðŸ”¹ GET PROFILE
+    @GetMapping
+    public CandidateProfile getProfile(Authentication authentication) {
+
+        String userEmail = authentication.getName();
+        return candidateProfileService.getProfile(userEmail);
+    }
+
+    // ðŸ”¹ UPDATE PROFILE
+    @PutMapping
+    public CandidateProfile updateProfile(
+            @RequestBody CandidateProfileRequest request,
+            Authentication authentication) {
+
+        String userEmail = authentication.getName();
+        return candidateProfileService.updateProfile(request, userEmail);
+    }
+
+    // ðŸ”¹ SOFT DELETE PROFILE
+    @DeleteMapping
+    public String deleteProfile(Authentication authentication) {
+
+        String userEmail = authentication.getName();
+        candidateProfileService.deleteProfile(userEmail);
+        return "Profile deleted successfully";
+    }
+}
+package com.interviewai.dto;
+
+import lombok.AllArgsConstructor;
+import lombok.Data;
+
+@Data
+@AllArgsConstructor
+public class AuthResponse {
+
+    private Long id;
+    private String name;
+    private String email;
+    private String role;
+}
+package com.interviewai.dto;
+
+import lombok.Data;
+
+import java.util.List;
+
+@Data
+public class CandidateProfileRequest {
+
+    private String resumeUrl;
+    private List<String> skills;
+    private Integer experienceYears;
+    private String targetRole;
+    private String education;
+    private String linkedinUrl;
+    private String githubUrl;
+}
+package com.interviewai.exception;
+
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.RestControllerAdvice;
+
+@RestControllerAdvice
+public class GlobalExceptionHandler {
+
+    @ExceptionHandler(UserAlreadyExistsException.class)
+    public ResponseEntity<String> handleUserAlreadyExists(UserAlreadyExistsException ex) {
+        return new ResponseEntity<>(ex.getMessage(), HttpStatus.BAD_REQUEST);
+    }
+    @ExceptionHandler(InvalidCredentialsException.class)
+    public ResponseEntity<String> handleInvalidCredentials(InvalidCredentialsException ex) {
+        return new ResponseEntity<>(ex.getMessage(), HttpStatus.UNAUTHORIZED);
+    }
+
+}
+package com.interviewai.exception;
+
+public class InvalidCredentialsException extends RuntimeException {
+
+    public InvalidCredentialsException(String message) {
+        super(message);
+    }
+}
+package com.interviewai.exception;
+
+public class UserAlreadyExistsException extends RuntimeException {
+
+    public UserAlreadyExistsException(String message) {
+        super(message);
+    }
+}
+package com.interviewai.model;
+
+import jakarta.persistence.*;
+import lombok.*;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
+
+import java.time.LocalDateTime;
+import java.util.List;
+
+@Entity
+@Table(name = "candidate_profiles")
+@Getter
+@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class CandidateProfile {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    // OneToOne with User
+    @OneToOne
+    @JoinColumn(name = "user_id", nullable = false, unique = true)
+    private User user;
+
+    private String resumeUrl;
+
+    // JSONB mapping
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(columnDefinition = "jsonb")
+    private List<String> skills;
+
+    private Integer experienceYears;
+
+    private String targetRole;
+
+    private String education;
+
+    private String linkedinUrl;
+
+    private String githubUrl;
+
+    private LocalDateTime createdAt;
+
+    private LocalDateTime updatedAt;
+
+    @Column(name = "is_deleted")
+    private Boolean isDeleted = false;
+
+}
+package com.interviewai.model;
+
+import jakarta.persistence.*;
+import lombok.*;
+
+import java.time.LocalDateTime;
+
+@Entity
+@Table(name = "interviews")
+@Getter
+@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class Interview {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(nullable = false)
+    private String title;
+
+    // Admin who scheduled interview
+    @ManyToOne
+    @JoinColumn(name = "admin_id", nullable = false)
+    private User admin;
+
+    // Candidate who will attend
+    @ManyToOne
+    @JoinColumn(name = "candidate_id", nullable = false)
+    private User candidate;
+
+    @Column(name = "scheduled_time", nullable = false)
+    private LocalDateTime scheduledTime;
+
+    @Column(name = "duration_minutes", nullable = false)
+    private Integer durationMinutes;
+
+    @Column(nullable = false)
+    private String passkey;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private InterviewStatus Status;
+
+    @Column(name = "created_at", updatable = false)
+    private LocalDateTime createdAt;
+}
+package com.interviewai.model;
+
+import jakarta.persistence.*;
+import lombok.*;
+
+import java.time.LocalDateTime;
+
+@Entity
+@Table(name = "interview_messages")
+@Getter
+@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class InterviewMessage {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @ManyToOne
+    @JoinColumn(name = "interview_id", nullable = false)
+    private Interview interview;
+
+    @Column(nullable = false)
+    private String sender; // AI or CANDIDATE
+
+    @Column(columnDefinition = "TEXT", nullable = false)
+    private String message;
+
+    private LocalDateTime createdAt;
+}
+package com.interviewai.model;
+
+import jakarta.persistence.*;
+import lombok.*;
+
+@Entity
+@Table(name = "interview_results")
+@Getter
+@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class InterviewResult {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @OneToOne
+    @JoinColumn(name = "interview_id", nullable = false)
+    private Interview interview;
+
+    private Integer technicalScore;
+    private Integer communicationScore;
+    private Integer confidenceScore;
+
+    @Column(columnDefinition = "TEXT")
+    private String aiFeedback;
+}
+package com.interviewai.model;
+
+public enum InterviewStatus {
+    SCHEDULED,
+    LOBBY,
+    IN_PROGRESS,
+    COMPLETED,
+    CANCELLED
+}
+package com.interviewai.model;
+
+public enum Role {
+    ADMIN,
+    USER
+}
+package com.interviewai.model;
+
+import jakarta.persistence.*;
+import lombok.*;
+
+@Entity
+@Table(name = "users")
+@Getter
+@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class User {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(nullable = false)
+    private String name;
+
+    @Column(nullable = false, unique = true)
+    private String email;
+
+    @Column(nullable = false)
+    private String password;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private Role role;
+
+    @Column(name = "created_at", updatable = false)
+    private java.time.LocalDateTime createdAt;
+
+}
+package com.interviewai.repository;
+
+import com.interviewai.model.CandidateProfile;
+import com.interviewai.model.User;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+import java.util.Optional;
+
+public interface CandidateProfileRepository
+        extends JpaRepository<CandidateProfile, Long> {
+
+    Optional<CandidateProfile> findByUser(User user);
+    Optional<CandidateProfile> findByUserAndIsDeletedFalse(User user);
+
+}
+package com.interviewai.repository;
+
+import com.interviewai.model.Interview;
+import com.interviewai.model.InterviewMessage;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+import java.util.List;
+
+public interface InterviewMessageRepository extends JpaRepository<InterviewMessage, Long> {
+
+    List<InterviewMessage> findByInterviewOrderByCreatedAtAsc(Interview interview);
+}
+package com.interviewai.repository;
+
+import com.interviewai.model.Interview;
+import com.interviewai.model.InterviewMessage;
+import com.interviewai.model.User;
+import org.springframework.data.jpa.repository.JpaRepository;
+import java.util.List;
+import java.util.Optional;
+
+
+public interface InterviewRepository extends JpaRepository<Interview, Long> {
+    static void save(InterviewMessage aiMessage) {
+    }
+
+    Optional<Interview> findByPasskey(String passkey);
+
+    List<Interview> findByCandidate(User candidate);
+}
+package com.interviewai.repository;
+
+import com.interviewai.model.InterviewResult;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface InterviewResultRepository
+        extends JpaRepository<InterviewResult, Long> {
+}
+package com.interviewai.repository;
+
+import com.interviewai.model.User;
+import org.springframework.data.jpa.repository.JpaRepository;
+import java.util.Optional;
+
+public interface UserRepository extends JpaRepository<User, Long> {
+
+    Optional<User> findByEmail(String email);
+    boolean existsByEmail(String email);
+
+}
+package com.interviewai.security;
+
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.stereotype.Component;
+import org.springframework.web.filter.OncePerRequestFilter;
+
+import java.io.IOException;
+import java.util.List;
+
+@Component
+public class JwtAuthenticationFilter extends OncePerRequestFilter {
+
+    private final JwtUtil jwtUtil;
+
+    public JwtAuthenticationFilter(JwtUtil jwtUtil) {
+        this.jwtUtil = jwtUtil;
+    }
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest request,
+                                    HttpServletResponse response,
+                                    FilterChain filterChain)
+            throws ServletException, IOException {
+
+        String header = request.getHeader("Authorization");
+
+        if (header != null && header.startsWith("Bearer ")) {
+
+            String token = header.substring(7);
+
+            if (jwtUtil.validateToken(token)) {
+
+                String email = jwtUtil.extractEmail(token);
+                String role = jwtUtil.extractRole(token);
+
+                UsernamePasswordAuthenticationToken authentication =
+                        new UsernamePasswordAuthenticationToken(
+                                email,
+                                null,
+                                List.of(new SimpleGrantedAuthority("ROLE_" + role))
+                        );
+
+                SecurityContextHolder.getContext().setAuthentication(authentication);
+            }
+        }
+
+        filterChain.doFilter(request, response);
+    }
+}
+package com.interviewai.security;
+
+import io.jsonwebtoken.*;
+import io.jsonwebtoken.security.Keys;
+import org.springframework.stereotype.Component;
+
+import java.security.Key;
+import java.util.Date;
+
+@Component
+public class JwtUtil {
+
+    private final String SECRET = "your_super_secret_key_that_should_be_long_enough_12345";
+
+    private final Key key = Keys.hmacShaKeyFor(SECRET.getBytes());
+
+    private final long EXPIRATION = 1000 * 60 * 60; // 1 hour
+
+    public String generateToken(String email, String role) {
+
+        return Jwts.builder()
+                .setSubject(email)
+                .claim("role", role)
+                .setIssuedAt(new Date())
+                .setExpiration(new Date(System.currentTimeMillis() + EXPIRATION))
+                .signWith(key, SignatureAlgorithm.HS256)
+                .compact();
+    }
+
+    public String extractEmail(String token) {
+        return getClaims(token).getSubject();
+    }
+
+    public String extractRole(String token) {
+        return getClaims(token).get("role", String.class);
+    }
+
+    public boolean validateToken(String token) {
+        try {
+            getClaims(token);
+            return true;
+        } catch (JwtException e) {
+            return false;
+        }
+    }
+
+    private Claims getClaims(String token) {
+        return Jwts.parserBuilder()
+                .setSigningKey(key)
+                .build()
+                .parseClaimsJws(token)
+                .getBody();
+    }
+}
+package com.interviewai.service;
+
+import com.interviewai.model.InterviewResult;
+
+public interface AiEvaluationService {
+
+    InterviewResult evaluateInterview(Long interviewId);
+
+
+}
+package com.interviewai.service;
+
+public interface AiInterviewService {
+
+    String generateAiReply(Long interviewId, String candidateMessage, String userEmail);
+    public String startInterviewSession(Long interviewId, String email);
+
+}
+
+package com.interviewai.service;
+
+import com.interviewai.dto.CandidateProfileRequest;
+import com.interviewai.model.CandidateProfile;
+
+public interface CandidateProfileService {
+
+    CandidateProfile createProfile(CandidateProfileRequest request, String userEmail);
+
+    CandidateProfile getProfile(String userEmail);
+
+    CandidateProfile updateProfile(CandidateProfileRequest request, String userEmail);
+
+    void deleteProfile(String userEmail);
+}
+package com.interviewai.service;
+
+import com.interviewai.model.Interview;
+import com.interviewai.model.InterviewResult;
+
+import java.time.LocalDateTime;
+import java.util.List;
+
+public interface InterviewService {
+
+    Interview scheduleInterview(
+            String title,
+            String candidateEmail,
+            LocalDateTime scheduledTime,
+            Integer durationMinutes,
+            String adminEmail
+    );
+
+    Interview joinLobby(String passkey, String userEmail);
+
+    Interview startInterview(Long interviewId, String userEmail);
+    InterviewResult endInterview(Long interviewId, String userEmail);
+
+
+    List<Interview> getCandidateInterviews(String userEmail);
+}
+package com.interviewai.service;
+
+import com.interviewai.model.User;
+
+public interface UserService {
+
+    User registerUser(String name, String email, String password, String role);
+    User loginUser(String email, String password);
+}
+package com.interviewai.service.impl;
+
+import com.interviewai.model.Interview;
+import com.interviewai.model.InterviewMessage;
+import com.interviewai.model.InterviewResult;
+import com.interviewai.repository.InterviewMessageRepository;
+import com.interviewai.repository.InterviewRepository;
+import com.interviewai.repository.InterviewResultRepository;
+import com.interviewai.service.AiEvaluationService;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.context.annotation.Profile;
+import org.springframework.stereotype.Service;
+
+import java.util.List;
+
+@Service
+@Profile("prod")
+public class AiEvaluationServiceImpl implements AiEvaluationService {
+
+    private final InterviewRepository interviewRepository;
+    private final InterviewMessageRepository messageRepository;
+    private final InterviewResultRepository resultRepository;
+    private final ChatClient chatClient;
+
+    public AiEvaluationServiceImpl(
+            InterviewRepository interviewRepository,
+            InterviewMessageRepository messageRepository,
+            InterviewResultRepository resultRepository,
+            ChatClient.Builder builder) {
+
+        this.interviewRepository = interviewRepository;
+        this.messageRepository = messageRepository;
+        this.resultRepository = resultRepository;
+        this.chatClient = builder.build(); // ðŸ”¥ important
+    }
+
+    @Override
+    public InterviewResult evaluateInterview(Long interviewId) {
+
+        Interview interview = interviewRepository.findById(interviewId)
+                .orElseThrow(() -> new RuntimeException("Interview not found"));
+
+        List<InterviewMessage> history =
+                messageRepository.findByInterviewOrderByCreatedAtAsc(interview);
+
+        StringBuilder transcript = new StringBuilder();
+
+        for (InterviewMessage msg : history) {
+            transcript.append(msg.getSender())
+                    .append(": ")
+                    .append(msg.getMessage())
+                    .append("\n");
+        }
+
+        String prompt = """
+You are an expert technical interviewer.
+
+Analyze the following interview transcript.
+
+Give output STRICTLY in this format:
+
+TechnicalScore: <number out of 10>
+CommunicationScore: <number out of 10>
+ConfidenceScore: <number out of 10>
+Feedback: <short paragraph>
+
+Transcript:
+""" + transcript;
+
+        String aiResponse = chatClient.prompt()
+                .user(prompt)
+                .call()
+                .content();
+
+        int tech = extractScore(aiResponse, "TechnicalScore:");
+        int comm = extractScore(aiResponse, "CommunicationScore:");
+        int conf = extractScore(aiResponse, "ConfidenceScore:");
+
+        InterviewResult result = InterviewResult.builder()
+                .interview(interview)
+                .technicalScore(tech)
+                .communicationScore(comm)
+                .confidenceScore(conf)
+                .aiFeedback(aiResponse)
+//                .createdAt(java.time.LocalDateTime.now())
+                .build();
+
+        return resultRepository.save(result);
+    }
+
+    private int extractScore(String text, String label) {
+        try {
+            int start = text.indexOf(label) + label.length();
+            String number = text.substring(start).trim().split("\\n")[0];
+            return Integer.parseInt(number.replaceAll("[^0-9]", ""));
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+}
+
+
+package com.interviewai.service.impl;
+
+import com.interviewai.dto.CandidateProfileRequest;
+import com.interviewai.model.CandidateProfile;
+import com.interviewai.model.User;
+import com.interviewai.repository.CandidateProfileRepository;
+import com.interviewai.repository.UserRepository;
+import com.interviewai.service.CandidateProfileService;
+import org.springframework.stereotype.Service;
+
+import java.time.LocalDateTime;
+
+@Service
+public class CandidateProfileServiceImpl implements CandidateProfileService {
+
+    private final CandidateProfileRepository candidateProfileRepository;
+    private final UserRepository userRepository;
+
+    public CandidateProfileServiceImpl(
+            CandidateProfileRepository candidateProfileRepository,
+            UserRepository userRepository) {
+
+        this.candidateProfileRepository = candidateProfileRepository;
+        this.userRepository = userRepository;
+    }
+
+    @Override
+    public CandidateProfile createProfile(CandidateProfileRequest request, String userEmail) {
+
+        User user = userRepository.findByEmail(userEmail)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+
+        if (candidateProfileRepository.findByUserAndIsDeletedFalse(user).isPresent()) {
+            throw new RuntimeException("Profile already exists");
+        }
+
+        CandidateProfile profile = CandidateProfile.builder()
+                .user(user)
+                .resumeUrl(request.getResumeUrl())
+                .skills(request.getSkills())
+                .experienceYears(request.getExperienceYears())
+                .targetRole(request.getTargetRole())
+                .education(request.getEducation())
+                .linkedinUrl(request.getLinkedinUrl())
+                .githubUrl(request.getGithubUrl())
+                .createdAt(LocalDateTime.now())
+                .updatedAt(LocalDateTime.now())
+                .isDeleted(false)
+                .build();
+
+        return candidateProfileRepository.save(profile);
+    }
+
+    @Override
+    public CandidateProfile getProfile(String userEmail) {
+
+        User user = userRepository.findByEmail(userEmail)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+
+        return candidateProfileRepository.findByUserAndIsDeletedFalse(user)
+                .orElseThrow(() -> new RuntimeException("Profile not found"));
+    }
+
+    @Override
+    public CandidateProfile updateProfile(CandidateProfileRequest request, String userEmail) {
+
+        User user = userRepository.findByEmail(userEmail)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+
+        CandidateProfile profile = candidateProfileRepository
+                .findByUserAndIsDeletedFalse(user)
+                .orElseThrow(() -> new RuntimeException("Profile not found"));
+
+        profile.setResumeUrl(request.getResumeUrl());
+        profile.setSkills(request.getSkills());
+        profile.setExperienceYears(request.getExperienceYears());
+        profile.setTargetRole(request.getTargetRole());
+        profile.setEducation(request.getEducation());
+        profile.setLinkedinUrl(request.getLinkedinUrl());
+        profile.setGithubUrl(request.getGithubUrl());
+        profile.setUpdatedAt(LocalDateTime.now());
+
+        return candidateProfileRepository.save(profile);
+    }
+
+    @Override
+    public void deleteProfile(String userEmail) {
+
+        User user = userRepository.findByEmail(userEmail)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+
+        CandidateProfile profile = candidateProfileRepository
+                .findByUserAndIsDeletedFalse(user)
+                .orElseThrow(() -> new RuntimeException("Profile not found"));
+
+        profile.setIsDeleted(true);
+        profile.setUpdatedAt(LocalDateTime.now());
+
+        candidateProfileRepository.save(profile);
+    }
+}
+package com.interviewai.service.impl;
+
+import com.interviewai.model.*;
+import com.interviewai.repository.InterviewRepository;
+import com.interviewai.repository.UserRepository;
+import com.interviewai.service.AiEvaluationService;
+import com.interviewai.service.InterviewService;
+import org.springframework.stereotype.Service;
+
+import java.time.LocalDateTime;
+import java.util.List;
+import java.util.UUID;
+
+
+
+@Service
+public class InterviewServiceImpl implements InterviewService {
+
+    private final InterviewRepository interviewRepository;
+    private final UserRepository userRepository;
+    private AiEvaluationService aiEvaluationService;
+
+    public InterviewServiceImpl(InterviewRepository interviewRepository,
+                                UserRepository userRepository,AiEvaluationService aiEvaluationService) {
+         this.aiEvaluationService = aiEvaluationService;
+        this.interviewRepository = interviewRepository;
+        this.userRepository = userRepository;
+    }
+
+    // ==============================
+    // 1ï¸âƒ£ ADMIN â€“ Schedule Interview
+    // ==============================
+    @Override
+    public Interview scheduleInterview(String title,
+                                       String candidateEmail,
+                                       LocalDateTime scheduledTime,
+                                       Integer durationMinutes,
+                                       String adminEmail) {
+
+        User admin = userRepository.findByEmail(adminEmail)
+                .orElseThrow(() -> new RuntimeException("Admin not found"));
+
+        if (admin.getRole() != Role.ADMIN) {
+            throw new RuntimeException("Only admin can schedule interviews");
+        }
+
+        User candidate = userRepository.findByEmail(candidateEmail)
+                .orElseThrow(() -> new RuntimeException("Candidate not registered"));
+
+        if (candidate.getRole() != Role.USER) {
+            throw new RuntimeException("Selected user is not a candidate");
+        }
+
+        String passkey = generatePasskey();
+
+        Interview interview = Interview.builder()
+                .title(title)
+                .admin(admin)
+                .candidate(candidate)
+                .scheduledTime(scheduledTime)
+                .durationMinutes(durationMinutes)
+                .passkey(passkey)
+                .Status(InterviewStatus.SCHEDULED)
+                .createdAt(LocalDateTime.now())
+                .build();
+
+        return interviewRepository.save(interview);
+    }
+
+    // ==============================
+    // 2ï¸âƒ£ CANDIDATE â€“ Join Lobby
+    // ==============================
+    @Override
+    public Interview joinLobby(String passkey, String userEmail) {
+
+        Interview interview = interviewRepository.findByPasskey(passkey)
+                .orElseThrow(() -> new RuntimeException("Invalid passkey"));
+
+        if (!interview.getCandidate().getEmail().equals(userEmail)) {
+            throw new RuntimeException("You are not authorized for this interview");
+        }
+
+        if (interview.getStatus() != InterviewStatus.SCHEDULED) {
+            throw new RuntimeException("Interview is not in scheduled state");
+        }
+
+        interview.setStatus(InterviewStatus.LOBBY);
+
+        return interviewRepository.save(interview);
+    }
+
+    // ==============================
+    // 3ï¸âƒ£ CANDIDATE â€“ Start Interview
+    // ==============================
+    @Override
+    public Interview startInterview(Long interviewId, String userEmail) {
+
+        Interview interview = interviewRepository.findById(interviewId)
+                .orElseThrow(() -> new RuntimeException("Interview not found"));
+
+        if (!interview.getCandidate().getEmail().equals(userEmail)) {
+            throw new RuntimeException("You are not authorized");
+        }
+
+        if (interview.getStatus() != InterviewStatus.LOBBY) {
+            throw new RuntimeException("Interview must be in lobby state");
+        }
+
+        interview.setStatus(InterviewStatus.IN_PROGRESS);
+
+        return interviewRepository.save(interview);
+    }
+    //end interview code here
+//    @Override
+//    public Interview endInterview(Long interviewId, String userEmail) {
+//
+//        Interview interview = interviewRepository.findById(interviewId)
+//                .orElseThrow(() -> new RuntimeException("Interview not found"));
+//
+//        if (!interview.getCandidate().getEmail().equals(userEmail)) {
+//            throw new RuntimeException("You are not authorized");
+//        }
+//
+//        if (interview.getStatus() != InterviewStatus.IN_PROGRESS) {
+//            throw new RuntimeException("Interview is not in progress");
+//        }
+//
+//        interview.setStatus(InterviewStatus.COMPLETED);
+//
+//        return interviewRepository.save(interview);
+//    }
+    @Override
+    public InterviewResult endInterview(Long interviewId, String userEmail) {
+
+        Interview interview = interviewRepository.findById(interviewId)
+                .orElseThrow(() -> new RuntimeException("Interview not found"));
+
+        if (!interview.getCandidate().getEmail().equals(userEmail)) {
+            throw new RuntimeException("Unauthorized");
+        }
+
+        if (interview.getStatus() != InterviewStatus.IN_PROGRESS) {
+            throw new RuntimeException("Interview not in progress");
+        }
+
+        // âœ… Set status completed
+        interview.setStatus(InterviewStatus.COMPLETED);
+        interviewRepository.save(interview);
+
+        // âœ… Call AI evaluation service
+        return aiEvaluationService.evaluateInterview(interviewId);
+    }
+
+
+    // ==============================
+    // 4ï¸âƒ£ CANDIDATE â€“ View My Interviews
+    // ==============================
+    @Override
+    public List<Interview> getCandidateInterviews(String userEmail) {
+
+        User user = userRepository.findByEmail(userEmail)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+
+        return interviewRepository.findByCandidate(user);
+    }
+
+    // ==============================
+    // Utility
+    // ==============================
+    private String generatePasskey() {
+        return UUID.randomUUID().toString().substring(0, 8);
+    }
+}
+package com.interviewai.service.impl;
+
+import com.interviewai.model.Interview;
+import com.interviewai.model.InterviewResult;
+import com.interviewai.repository.InterviewRepository;
+import com.interviewai.repository.InterviewResultRepository;
+import com.interviewai.service.AiEvaluationService;
+import org.springframework.context.annotation.Profile;
+import org.springframework.stereotype.Service;
+
+import java.time.LocalDateTime;
+import java.util.Random;
+
+@Service
+@Profile("dev")
+public class MockAiEvaluationServiceImpl implements AiEvaluationService {
+
+    private final InterviewRepository interviewRepository;
+    private final InterviewResultRepository resultRepository;
+
+    public MockAiEvaluationServiceImpl(
+            InterviewRepository interviewRepository,
+            InterviewResultRepository resultRepository) {
+
+        this.interviewRepository = interviewRepository;
+        this.resultRepository = resultRepository;
+    }
+
+    @Override
+    public InterviewResult evaluateInterview(Long interviewId) {
+
+        Interview interview = interviewRepository.findById(interviewId)
+                .orElseThrow(() -> new RuntimeException("Interview not found"));
+
+        // ðŸ”¥ Generate realistic random scores (out of 10)
+        Random random = new Random();
+
+        int technical = 6 + random.nextInt(5);       // 6â€“10
+        int communication = 5 + random.nextInt(5);   // 5â€“9
+        int confidence = 5 + random.nextInt(5);      // 5â€“9
+
+        String feedback = """
+TechnicalScore: %d
+CommunicationScore: %d
+ConfidenceScore: %d
+Feedback: Candidate demonstrated good understanding of core concepts. 
+Needs improvement in structured communication and confidence handling.
+""".formatted(technical, communication, confidence);
+
+        InterviewResult result = InterviewResult.builder()
+                .interview(interview)
+                .technicalScore(technical)
+                .communicationScore(communication)
+                .confidenceScore(confidence)
+                .aiFeedback(feedback)
+//                .createdAt(LocalDateTime.now())
+                .build();
+
+        return resultRepository.save(result);
+    }
+}
+package com.interviewai.service.impl;
+
+import com.interviewai.model.*;
+import com.interviewai.repository.*;
+import com.interviewai.service.AiInterviewService;
+import org.springframework.context.annotation.Profile;
+import org.springframework.stereotype.Service;
+
+import java.time.LocalDateTime;
+import java.util.List;
+
+@Service
+@Profile("dev")
+public class MockAiInterviewServiceImpl implements AiInterviewService {
+
+    private final InterviewRepository interviewRepository;
+    private final InterviewMessageRepository messageRepository;
+
+    public MockAiInterviewServiceImpl(InterviewRepository interviewRepository,
+                                      InterviewMessageRepository messageRepository) {
+        this.interviewRepository = interviewRepository;
+        this.messageRepository = messageRepository;
+    }
+
+    @Override
+    public String startInterviewSession(Long interviewId, String email) {
+
+        Interview interview = interviewRepository.findById(interviewId)
+                .orElseThrow(() -> new RuntimeException("Interview not found"));
+
+        if (!interview.getCandidate().getEmail().equals(email)) {
+            throw new RuntimeException("Unauthorized");
+        }
+
+        String greeting = "Welcome " + interview.getCandidate().getName() +
+                ". This is a mock AI interview. Tell me about yourself.";
+
+        messageRepository.save(
+                InterviewMessage.builder()
+                        .interview(interview)
+                        .sender("AI")
+                        .message(greeting)
+                        .createdAt(LocalDateTime.now())
+                        .build()
+        );
+
+        return greeting;
+    }
+
+    @Override
+    public String generateAiReply(Long interviewId, String candidateMessage, String userEmail) {
+
+        Interview interview = interviewRepository.findById(interviewId)
+                .orElseThrow(() -> new RuntimeException("Interview not found"));
+
+        if (!interview.getCandidate().getEmail().equals(userEmail)) {
+            throw new RuntimeException("Unauthorized");
+        }
+
+        // Save candidate message
+        messageRepository.save(
+                InterviewMessage.builder()
+                        .interview(interview)
+                        .sender("CANDIDATE")
+                        .message(candidateMessage)
+                        .createdAt(LocalDateTime.now())
+                        .build()
+        );
+
+        // Fetch history
+        List<InterviewMessage> history =
+                messageRepository.findByInterviewOrderByCreatedAtAsc(interview);
+
+        String reply;
+
+        String msg = candidateMessage.toLowerCase();
+
+        if (msg.contains("java")) {
+            reply = "What are the differences between HashMap and ConcurrentHashMap?";
+        } else if (msg.contains("react")) {
+            reply = "Explain how Virtual DOM works.";
+        } else if (msg.contains("database")) {
+            reply = "What is indexing and why is it important?";
+        } else {
+            reply = "Can you explain that in more detail?";
+        }
+
+        // Save AI reply
+        messageRepository.save(
+                InterviewMessage.builder()
+                        .interview(interview)
+                        .sender("AI")
+                        .message(reply)
+                        .createdAt(LocalDateTime.now())
+                        .build()
+        );
+
+        return reply;
+    }
+}
+package com.interviewai.service.impl;
+
+import com.interviewai.model.*;
+import com.interviewai.repository.*;
+import com.interviewai.service.AiInterviewService;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.context.annotation.Profile;
+import org.springframework.stereotype.Service;
+
+import java.time.LocalDateTime;
+import java.util.List;
+
+@Service
+@Profile("prod") // âœ… Only active in production
+public class OpenAiInterviewServiceImpl implements AiInterviewService {
+
+    private final ChatClient chatClient;
+    private final InterviewRepository interviewRepository;
+    private final InterviewMessageRepository messageRepository;
+
+    public OpenAiInterviewServiceImpl(ChatClient.Builder builder,
+                                      InterviewRepository interviewRepository,
+                                      InterviewMessageRepository messageRepository) {
+
+        this.chatClient = builder.build();
+        this.interviewRepository = interviewRepository;
+        this.messageRepository = messageRepository;
+    }
+
+    @Override
+    public String generateAiReply(Long interviewId, String candidateMessage, String userEmail) {
+
+        Interview interview = interviewRepository.findById(interviewId)
+                .orElseThrow(() -> new RuntimeException("Interview not found"));
+
+        if (!interview.getCandidate().getEmail().equals(userEmail)) {
+            throw new RuntimeException("Unauthorized");
+        }
+
+        // Save candidate message
+        messageRepository.save(
+                InterviewMessage.builder()
+                        .interview(interview)
+                        .sender("CANDIDATE")
+                        .message(candidateMessage)
+                        .createdAt(LocalDateTime.now())
+                        .build()
+        );
+
+        // Fetch conversation history
+        List<InterviewMessage> history =
+                messageRepository.findByInterviewOrderByCreatedAtAsc(interview);
+
+        StringBuilder context = new StringBuilder();
+
+        context.append("""
+                You are a professional AI interviewer.
+                Ask role-based technical questions.
+                Maintain conversational tone.
+                Analyze confidence based on response clarity.
+                """);
+
+        for (InterviewMessage msg : history) {
+            context.append("\n")
+                    .append(msg.getSender())
+                    .append(": ")
+                    .append(msg.getMessage());
+        }
+
+        String aiResponse = chatClient.prompt()
+                .user(context.toString())
+                .call()
+                .content();
+
+        // Save AI response
+        messageRepository.save(
+                InterviewMessage.builder()
+                        .interview(interview)
+                        .sender("AI")
+                        .message(aiResponse)
+                        .createdAt(LocalDateTime.now())
+                        .build()
+        );
+
+        return aiResponse;
+    }
+
+    @Override
+    public String startInterviewSession(Long interviewId, String email) {
+
+        Interview interview = interviewRepository.findById(interviewId)
+                .orElseThrow(() -> new RuntimeException("Interview not found"));
+
+        if (!interview.getCandidate().getEmail().equals(email)) {
+            throw new RuntimeException("Unauthorized");
+        }
+
+        if (interview.getStatus() != InterviewStatus.IN_PROGRESS) {
+            throw new RuntimeException("Interview must be IN_PROGRESS");
+        }
+
+        String greeting = "Good morning " + interview.getCandidate().getName() +
+                ". Shall we begin the interview?";
+
+        InterviewMessage aiMessage = InterviewMessage.builder()
+                .interview(interview)
+                .sender("AI")
+                .message(greeting)
+                .createdAt(LocalDateTime.now())
+                .build();
+
+        // âœ… FIXED: Save using messageRepository
+        messageRepository.save(aiMessage);
+
+        return greeting;
+    }
+}
+package com.interviewai.service.impl;
+
+import com.interviewai.exception.InvalidCredentialsException;
+import com.interviewai.exception.UserAlreadyExistsException;
+import com.interviewai.model.Role;
+import com.interviewai.model.User;
+import com.interviewai.repository.UserRepository;
+import com.interviewai.service.UserService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+import org.springframework.security.crypto.password.PasswordEncoder;
+
+
+
+
+@Service
+public class UserServiceImpl implements UserService {
+
+
+    private final UserRepository userRepository;
+    private final PasswordEncoder passwordEncoder;
+
+    public UserServiceImpl(UserRepository userRepository,
+                           PasswordEncoder passwordEncoder) {
+        this.userRepository = userRepository;
+        this.passwordEncoder = passwordEncoder;
+    }
+
+    @Override
+    public User registerUser(String name, String email, String password, String role) {
+
+        if (userRepository.existsByEmail(email)) {
+            throw new UserAlreadyExistsException("User already exists with this email");
+        }
+
+        User user = User.builder()
+                .name(name)
+                .email(email)
+                .password(passwordEncoder.encode(password))
+                .role(Role.valueOf(role.toUpperCase()))
+                .build();
+
+        return userRepository.save(user);
+    }
+   @Override
+    public User loginUser(String email, String password) {
+
+        User user = userRepository.findByEmail(email)
+                .orElseThrow(() -> new InvalidCredentialsException("Invalid email or password"));
+
+        if (!passwordEncoder.matches(password, user.getPassword())) {
+            throw new InvalidCredentialsException("Invalid email or password");
+        }
+
+        return user;
+    }
+
+
+}

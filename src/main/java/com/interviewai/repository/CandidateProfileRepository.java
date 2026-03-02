@@ -12,4 +12,6 @@ public interface CandidateProfileRepository
     Optional<CandidateProfile> findByUser(User user);
     Optional<CandidateProfile> findByUserAndIsDeletedFalse(User user);
 
+    //  NEW — find profile directly by email (avoids extra User lookup)
+    Optional<CandidateProfile> findByUserEmailAndIsDeletedFalse(String email);
 }

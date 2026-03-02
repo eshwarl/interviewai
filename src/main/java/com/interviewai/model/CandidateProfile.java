@@ -21,14 +21,20 @@ public class CandidateProfile {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    // OneToOne with User
     @OneToOne
     @JoinColumn(name = "user_id", nullable = false, unique = true)
     private User user;
 
     private String resumeUrl;
 
-    // JSONB mapping
+    // 🔥 NEW — raw text extracted from PDF
+    @Column(columnDefinition = "TEXT")
+    private String resumeText;
+
+    // 🔥 NEW — AI parsed summary
+    @Column(columnDefinition = "TEXT")
+    private String resumeSummary;
+
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(columnDefinition = "jsonb")
     private List<String> skills;
@@ -49,5 +55,4 @@ public class CandidateProfile {
 
     @Column(name = "is_deleted")
     private Boolean isDeleted = false;
-
 }
