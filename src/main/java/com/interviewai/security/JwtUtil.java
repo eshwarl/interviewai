@@ -14,18 +14,19 @@ public class JwtUtil {
     @Value("${jwt.secret}")
     private String secret;
 
+    // 🔥 Reduced from 1 hour to 15 minutes
+    private final long ACCESS_TOKEN_EXPIRY = 1000 * 60 * 60 * 24; // 15 mins
+
     private Key getKey() {
         return Keys.hmacShaKeyFor(secret.getBytes());
     }
-
-    private final long EXPIRATION = 1000 * 60 * 60; // 1 hour
 
     public String generateToken(String email, String role) {
         return Jwts.builder()
                 .setSubject(email)
                 .claim("role", role)
                 .setIssuedAt(new Date())
-                .setExpiration(new Date(System.currentTimeMillis() + EXPIRATION))
+                .setExpiration(new Date(System.currentTimeMillis() + ACCESS_TOKEN_EXPIRY))
                 .signWith(getKey(), SignatureAlgorithm.HS256)
                 .compact();
     }

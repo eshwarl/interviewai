@@ -1,5 +1,6 @@
 package com.interviewai.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.persistence.*;
 import lombok.*;
 
@@ -21,14 +22,15 @@ public class Interview {
     @Column(nullable = false)
     private String title;
 
-    // Admin who scheduled interview
-    @ManyToOne
+    // 🔥 Prevent circular JSON serialization
+    @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "admin_id", nullable = false)
+    @JsonIgnoreProperties({"hibernateLazyInitializer", "handler", "password", "interviews"})
     private User admin;
 
-    // Candidate who will attend
-    @ManyToOne
+    @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "candidate_id", nullable = false)
+    @JsonIgnoreProperties({"hibernateLazyInitializer", "handler", "password", "interviews"})
     private User candidate;
 
     @Column(name = "scheduled_time", nullable = false)

@@ -1,5 +1,6 @@
 package com.interviewai.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.persistence.*;
 import lombok.*;
 
@@ -16,8 +17,10 @@ public class InterviewResult {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @OneToOne
+    // 🔥 Only expose id and title from Interview — prevent circular reference
+    @OneToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "interview_id", nullable = false)
+    @JsonIgnoreProperties({"hibernateLazyInitializer", "handler", "admin", "candidate", "passkey"})
     private Interview interview;
 
     private Integer technicalScore;

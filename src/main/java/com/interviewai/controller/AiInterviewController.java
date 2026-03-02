@@ -23,13 +23,13 @@ public class AiInterviewController {
 
         return aiInterviewService.generateAiReply(interviewId, message, email);
     }
-    @PostMapping("/{interviewId}/start")
-    public String startInterview(@PathVariable Long interviewId,
-                                 Authentication authentication) {
-
-        String email = authentication.getName();
-
-        return aiInterviewService.startInterviewSession(interviewId, email);
-    }
+//    @PostMapping("/{interviewId}/start")
+//    public String startInterview(@PathVariable Long interviewId,
+//                                 Authentication authentication) {
+//
+//        String email = authentication.getName();
+//
+//        return aiInterviewService.startInterviewSession(interviewId, email);
+//    }
 
 }

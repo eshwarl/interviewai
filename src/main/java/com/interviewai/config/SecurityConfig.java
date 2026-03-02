@@ -27,55 +27,46 @@ public class SecurityConfig {
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
 
         http
-                // 🔥 Enable CORS properly
                 .cors(cors -> cors.configurationSource(corsConfigurationSource()))
-
                 .csrf(csrf -> csrf.disable())
-
                 .sessionManagement(session ->
                         session.sessionCreationPolicy(SessionCreationPolicy.STATELESS)
                 )
-
                 .authorizeHttpRequests(auth -> auth
 
-                        // 🔥 Important: allow preflight
+                        // Preflight
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
 
+                        // Public
                         .requestMatchers("/api/auth/**").permitAll()
+
+                        // WebSocket
+                        .requestMatchers("/ws-interview/**").permitAll()
+
+                        // 🔥 Results accessible by BOTH USER and ADMIN
+                        .requestMatchers("/api/user/results/**").hasAnyRole("USER", "ADMIN")
+
+                        // Role-specific
                         .requestMatchers("/api/admin/**").hasRole("ADMIN")
                         .requestMatchers("/api/user/**").hasRole("USER")
                         .requestMatchers("/api/resume/**").hasRole("USER")
 
-                        // 🔥 Allow WebSocket handshake
-                        .requestMatchers("/ws-interview/**").permitAll()
-
                         .anyRequest().authenticated()
                 )
-
                 .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class);
 
         return http.build();
     }
 
-    // 🔥 Proper CORS config for WebSocket + REST
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
-
         CorsConfiguration configuration = new CorsConfiguration();
-
         configuration.setAllowCredentials(true);
-
-        // IMPORTANT: Must match frontend origin exactly
         configuration.setAllowedOrigins(List.of("http://localhost:5173"));
-
         configuration.setAllowedHeaders(List.of("*"));
         configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
-
-        UrlBasedCorsConfigurationSource source =
-                new UrlBasedCorsConfigurationSource();
-
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/**", configuration);
-
         return source;
     }
 
