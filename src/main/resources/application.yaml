@@ -9,6 +9,20 @@ spring:
   jwt:
     secret: ${JWT_SECRET}
 
+  # 🔥 Email config
+  mail:
+    host: smtp.gmail.com
+    port: 587
+    username: ${MAIL_USERNAME}
+    password: ${MAIL_PASSWORD}
+    from: ${MAIL_FROM:${MAIL_USERNAME}}
+    properties:
+      mail:
+        smtp:
+          auth: true
+          starttls:
+            enable: true
+
   jpa:
     hibernate:
       ddl-auto: validate
@@ -35,5 +49,6 @@ spring:
       enabled: true
       max-file-size: 5MB
       max-request-size: 5MB
+
 server:
   port: 8082

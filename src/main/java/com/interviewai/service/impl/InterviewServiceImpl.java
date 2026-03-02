@@ -8,6 +8,7 @@ import com.interviewai.model.*;
 import com.interviewai.repository.InterviewRepository;
 import com.interviewai.repository.UserRepository;
 import com.interviewai.service.AiEvaluationService;
+import com.interviewai.service.EmailService;
 import com.interviewai.service.InterviewService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -25,13 +26,16 @@ public class InterviewServiceImpl implements InterviewService {
     private final InterviewRepository interviewRepository;
     private final UserRepository userRepository;
     private final AiEvaluationService aiEvaluationService;
+    private final EmailService emailService;
 
     public InterviewServiceImpl(InterviewRepository interviewRepository,
                                 UserRepository userRepository,
-                                AiEvaluationService aiEvaluationService) {
+                                AiEvaluationService aiEvaluationService,
+                                EmailService emailService) {
         this.interviewRepository = interviewRepository;
         this.userRepository = userRepository;
         this.aiEvaluationService = aiEvaluationService;
+        this.emailService = emailService;
     }
 
     // ==============================
@@ -71,8 +75,13 @@ public class InterviewServiceImpl implements InterviewService {
                 .createdAt(LocalDateTime.now())
                 .build();
 
+        Interview saved = interviewRepository.save(interview);
+
+        // 🔥 Send email to candidate asynchronously
+        emailService.sendInterviewScheduledEmail(saved);
+
         log.info("Interview scheduled: {} for candidate: {}", title, candidateEmail);
-        return interviewRepository.save(interview);
+        return saved;
     }
 
     // ==============================
@@ -92,6 +101,22 @@ public class InterviewServiceImpl implements InterviewService {
             throw new InvalidInterviewStateException(
                     "Interview is not in SCHEDULED state. Current state: " + interview.getStatus()
             );
+        }
+
+        // 🔥 Time window validation
+        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime joinFrom  = interview.getScheduledTime().minusMinutes(15);
+        LocalDateTime joinUntil = interview.getScheduledTime().plusMinutes(interview.getDurationMinutes());
+
+        if (now.isBefore(joinFrom)) {
+            long minutesLeft = java.time.Duration.between(now, joinFrom).toMinutes() + 1;
+            throw new InvalidInterviewStateException(
+                    "Interview not active yet. Join window opens in " + minutesLeft + " minutes."
+            );
+        }
+
+        if (now.isAfter(joinUntil)) {
+            throw new InvalidInterviewStateException("Interview session has expired.");
         }
 
         interview.setStatus(InterviewStatus.LOBBY);
@@ -149,7 +174,6 @@ public class InterviewServiceImpl implements InterviewService {
 
         log.info("Interview {} completed by {}", interviewId, userEmail);
 
-        // ✅ Trigger AI evaluation
         return aiEvaluationService.evaluateInterview(interviewId);
     }
 
