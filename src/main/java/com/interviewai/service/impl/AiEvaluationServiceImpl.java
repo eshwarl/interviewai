@@ -1,5 +1,7 @@
 package com.interviewai.service.impl;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.interviewai.model.Interview;
 import com.interviewai.model.InterviewMessage;
 import com.interviewai.model.InterviewResult;
@@ -21,17 +23,20 @@ public class AiEvaluationServiceImpl implements AiEvaluationService {
     private final InterviewMessageRepository messageRepository;
     private final InterviewResultRepository resultRepository;
     private final ChatClient chatClient;
+    private final ObjectMapper objectMapper;
 
     public AiEvaluationServiceImpl(
             InterviewRepository interviewRepository,
             InterviewMessageRepository messageRepository,
             InterviewResultRepository resultRepository,
-            ChatClient.Builder builder) {
+            ChatClient.Builder builder,
+            ObjectMapper objectMapper) {
 
         this.interviewRepository = interviewRepository;
         this.messageRepository = messageRepository;
         this.resultRepository = resultRepository;
-        this.chatClient = builder.build(); // 🔥 important
+        this.chatClient = builder.build();
+        this.objectMapper = objectMapper;
     }
 
     @Override
@@ -57,12 +62,18 @@ You are an expert technical interviewer.
 
 Analyze the following interview transcript.
 
-Give output STRICTLY in this format:
+Return ONLY valid JSON in this exact format:
 
-TechnicalScore: <number out of 10>
-CommunicationScore: <number out of 10>
-ConfidenceScore: <number out of 10>
-Feedback: <short paragraph>
+{
+  "technicalScore": number (0-10),
+  "communicationScore": number (0-10),
+  "confidenceScore": number (0-10),
+  "feedback": "short paragraph"
+}
+
+Do NOT include markdown.
+Do NOT include explanation.
+Only raw JSON.
 
 Transcript:
 """ + transcript;
@@ -72,31 +83,26 @@ Transcript:
                 .call()
                 .content();
 
-        int tech = extractScore(aiResponse, "TechnicalScore:");
-        int comm = extractScore(aiResponse, "CommunicationScore:");
-        int conf = extractScore(aiResponse, "ConfidenceScore:");
-
-        InterviewResult result = InterviewResult.builder()
-                .interview(interview)
-                .technicalScore(tech)
-                .communicationScore(comm)
-                .confidenceScore(conf)
-                .aiFeedback(aiResponse)
-//                .createdAt(java.time.LocalDateTime.now())
-                .build();
-
-        return resultRepository.save(result);
-    }
-
-    private int extractScore(String text, String label) {
         try {
-            int start = text.indexOf(label) + label.length();
-            String number = text.substring(start).trim().split("\\n")[0];
-            return Integer.parseInt(number.replaceAll("[^0-9]", ""));
+            JsonNode node = objectMapper.readTree(aiResponse);
+
+            int tech = node.get("technicalScore").asInt();
+            int comm = node.get("communicationScore").asInt();
+            int conf = node.get("confidenceScore").asInt();
+            String feedback = node.get("feedback").asText();
+
+            InterviewResult result = InterviewResult.builder()
+                    .interview(interview)
+                    .technicalScore(tech)
+                    .communicationScore(comm)
+                    .confidenceScore(conf)
+                    .aiFeedback(feedback)
+                    .build();
+
+            return resultRepository.save(result);
+
         } catch (Exception e) {
-            return 0;
+            throw new RuntimeException("Failed to parse AI response: " + aiResponse);
         }
     }
 }
-
-
